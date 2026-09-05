@@ -1,0 +1,32 @@
+# Превращает тег в релиз из уже собранных файлов, лежащих в release/.
+#
+# Здесь ничего не собирается: исходников в этом репозитории нет, он публичный и служит витриной.
+# Сборка живёт в рабочем (приватном) репозитории, а сюда приезжают только готовые файлы.
+name: publish
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Проверить, что файлы на месте
+        run: |
+          ls -la release
+          test -f release/com.grozovsky.steam-price-converter.star
+          test -f release/steam-price-converter.user.js
+
+      - name: Опубликовать релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --title "Steam Price Converter $GITHUB_REF_NAME" \
+            --notes-file .github/release-notes.md
