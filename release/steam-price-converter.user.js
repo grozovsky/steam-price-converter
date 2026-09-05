@@ -1,9 +1,13 @@
+// Tampermonkey обновляет скрипт сам, если знает, где лежит свежий: @updateURL и @downloadURL ниже всегда
+// указывают на последний релиз, так что перекачивать вручную не нужно.
 // ==UserScript==
 // @name         Steam Price Converter (₽ / $)
 // @namespace    https://github.com/grozovsky/steam-price-converter
-// @version      1.0.0
+// @version      1.1.0
 // @description  Показывает цены магазина Steam в рублях и долларах рядом с оригиналом, независимо от региона аккаунта.
 // @author       grozovsky
+// @updateURL    https://github.com/grozovsky/steam-price-converter/releases/latest/download/steam-price-converter.user.js
+// @downloadURL  https://github.com/grozovsky/steam-price-converter/releases/latest/download/steam-price-converter.user.js
 // @match        https://store.steampowered.com/*
 // @match        https://steamcommunity.com/*
 // @run-at       document-start
@@ -185,7 +189,8 @@
     galaxy_method: "SBP",
     steam_login: "",
     // Steam's own browser window keeps the payment inside the client and shows the domain in its address bar.
-    pay_target: "steam"
+    pay_target: "steam",
+    auto_restart: "no"
   };
   var MODES = ["off", "rub", "usd", "both"];
   var SOURCES = ["market", "cbr"];
@@ -200,7 +205,8 @@
     const provider = providerById(typeof r.provider === "string" ? r.provider : void 0).id;
     const login = typeof r.steam_login === "string" && /^[A-Za-z0-9_\-.]{1,64}$/.test(r.steam_login) ? r.steam_login : "";
     const pt = PAY_TARGETS.includes(r.pay_target) ? r.pay_target : DEFAULT_SETTINGS.pay_target;
-    return { mode, source, store_currency: sc, provider, galaxy_method: gm, steam_login: login, pay_target: pt };
+    const ar = r.auto_restart === "yes" ? "yes" : "no";
+    return { mode, source, store_currency: sc, provider, galaxy_method: gm, steam_login: login, pay_target: pt, auto_restart: ar };
   }
 
   // core/currencies.ts
@@ -431,6 +437,8 @@
   var HOST_CLASS = "spc-host";
   var STRIKE_CLASS = "spc-strike";
   var STRIKE_VAR = "--spc-conv";
+  var SEARCH_COL_VAR = "--spc-search-price";
+  var SEARCH_COL_GAP = 10;
   function inOwnUi(el) {
     return !!el?.closest(`.${CONV_CLASS}, .${UI_CLASS}`);
   }
@@ -475,6 +483,23 @@
       widths.push([host, w]);
     }
     for (const [host, w] of widths) host.style.setProperty(STRIKE_VAR, `${w}px`);
+  }
+  function layoutSearchColumn(doc) {
+    const grids = doc.querySelectorAll(".responsive_search_name_combined");
+    if (!grids.length) return;
+    let need = 0;
+    grids.forEach((grid) => {
+      const cell = grid.querySelector(".search_price_discount_combined");
+      if (!cell) return;
+      const right = cell.getBoundingClientRect().right;
+      let left = right;
+      cell.querySelectorAll("*").forEach((el) => {
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.left < left) left = r.left;
+      });
+      if (right > left) need = Math.max(need, Math.ceil(right - left) + SEARCH_COL_GAP);
+    });
+    if (need > 0) doc.documentElement.style.setProperty(SEARCH_COL_VAR, `${need}px`);
   }
   function siblingConv(node) {
     const next = node.nextSibling;
@@ -524,6 +549,7 @@
       const pending2 = /* @__PURE__ */ new Set();
       const ok = annotateTextNode(root, ctx, pending2);
       layoutStrikes(pending2);
+      layoutSearchColumn(root.ownerDocument);
       return ok ? 1 : 0;
     }
     if (root.nodeType !== 1 && root.nodeType !== 9 && root.nodeType !== 11) return 0;
@@ -543,6 +569,7 @@
     const pending = /* @__PURE__ */ new Set();
     for (const t of nodes) if (annotateTextNode(t, ctx, pending)) count++;
     layoutStrikes(pending);
+    layoutSearchColumn(doc);
     return count;
   }
   function rerenderAll(doc, ctx) {
@@ -553,6 +580,7 @@
       span.textContent = render(amount, from, ctx);
     });
     layoutStrikes(doc.querySelectorAll(`.${STRIKE_CLASS}`));
+    layoutSearchColumn(doc);
   }
   function applyMode(doc, mode) {
     doc.documentElement.classList.toggle("spc-off", mode === "off");
@@ -573,6 +601,7 @@
         else processTree(node, ctx);
       }
       layoutStrikes(pending);
+      layoutSearchColumn(doc);
     };
     const mo = new MutationObserver((muts) => {
       for (const m of muts) {
@@ -777,6 +806,34 @@
     style.textContent = `
 .${CONV_CLASS}{font-size:.85em;opacity:.78;margin-left:.35em;white-space:nowrap;font-weight:normal;letter-spacing:0}
 html.spc-off .${CONV_CLASS}{display:none}
+/* A price never breaks mid-number: in Steam's narrow slots "3 773,00₸" was splitting across two lines. */
+html:not(.spc-off) .${HOST_CLASS}{white-space:nowrap}
+/* Search rows are a grid. Its price column is a percentage of the row, and the price block is glued to that
+   column's right edge and spills leftwards, so our suffix pushed it over the release date and the review icon.
+   Widening that column moves the date and the icon left instead; the price itself does not move. The width is
+   one number for the whole list, measured by layoutSearchColumn — sizing each row to its own content would step
+   the dates down the page. Until the first measurement the column keeps Steam's own 25%.
+   Below 751px Steam switches to its own two-column layout, which has no room to give and needs no help. */
+@media screen and (min-width:751px){
+html:not(.spc-off) .responsive_search_name_combined{grid-template-columns:minmax(0,1fr) auto 30px var(${SEARCH_COL_VAR},25%)}
+}
+/* Hover pop-ups sit the price next to the capsule thumbnail and cap it at half the width; with our suffix the
+   number wrapped and the block hung out of the card. The price keeps its natural width now, its neighbour gives
+   up the difference. Steam's class names here are hashed per build, so the price widget is found through :has(). */
+html:not(.spc-off) :has(>.StoreSalePriceWidgetContainer){max-width:none!important;flex-shrink:0}
+html:not(.spc-off) :has(+ *>.StoreSalePriceWidgetContainer){min-width:0;flex-shrink:1}
+/* The "Новинка" badge standing in front of the discount is what made the price row overflow in the first place:
+   badge + discount + two prices never fit a capsule. It leaves the row and becomes a ribbon pinned to the bottom
+   right of the artwork just above the price — Steam's own blue, a pennant notch on the left, a shadow so it reads
+   over any cover. Higher than the artwork is out of reach: the price bar declares container-type, which makes it
+   the containing block for anything absolute inside it.
+   The badge has no class of its own that survives a Steam build, so it is found by shape: it is the first of the
+   three children of a discounted widget (badge, discount, prices), or of the two of an undiscounted one. */
+html:not(.spc-off) .StoreSalePriceWidgetContainer.Discounted>:first-child:nth-last-child(3),
+html:not(.spc-off) .StoreSalePriceWidgetContainer:not(.Discounted)>:first-child:nth-last-child(2){position:absolute;right:0;bottom:calc(100% + 7px);z-index:2;min-width:0;padding:3px 10px 3px 16px;font-size:11px;line-height:13px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:#fff;background:linear-gradient(135deg,#43b6ff 0%,#1a76c4 55%,#0d5a9c 100%);box-shadow:0 2px 7px rgba(0,0,0,.6);clip-path:polygon(9px 0,100% 0,100% 100%,9px 100%,0 50%);white-space:nowrap;pointer-events:none}
+/* Safety net for any capsule still too narrow for its price: the overflow goes left, over the artwork, instead of
+   cutting the price off at the right edge. Measured to change nothing on capsules that already fit. */
+html:not(.spc-off) .CapsuleBottomBar{justify-content:flex-end}
 /* Cart panel: same shape as Steam's checkout button (its classes are copied onto ours), Steam's green over it. */
 .${CART_BTN_CLASS}{background:linear-gradient(to right,#75b022 5%,#588a1b 95%)!important;color:#d2efa9!important;border:none!important;width:100%;margin-bottom:8px}
 .${CART_BTN_CLASS}:hover{background:linear-gradient(to right,#8ed629 5%,#6aa621 95%)!important;color:#fff!important}
@@ -816,6 +873,11 @@ html:not(.spc-off) .${STRIKE_CLASS}::before{transform:none!important;right:var($
     host.insertBefore(wrap, host.firstChild);
     return select;
   }
+
+  // core/update.ts
+  var RELEASE_REPO = "grozovsky/steam-price-converter";
+  var RELEASE_API = `https://api.github.com/repos/${RELEASE_REPO}/releases/latest`;
+  var RELEASE_ASSET_PREFIX = `https://github.com/${RELEASE_REPO}/releases/download/`;
 
   // core/index.ts
   function domReady(doc) {
