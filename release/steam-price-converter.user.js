@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Steam Price Converter (₽ / $)
 // @namespace    https://github.com/grozovsky/steam-price-converter
-// @version      1.1.0
+// @version      1.2.0
 // @description  Показывает цены магазина Steam в рублях и долларах рядом с оригиналом, независимо от региона аккаунта.
 // @author       grozovsky
 // @updateURL    https://github.com/grozovsky/steam-price-converter/releases/latest/download/steam-price-converter.user.js
@@ -192,7 +192,7 @@
     pay_target: "steam",
     auto_restart: "no"
   };
-  var MODES = ["off", "rub", "usd", "both"];
+  var MODES = ["off", "rub", "bank", "usd", "both"];
   var SOURCES = ["market", "cbr"];
   var PAY_TARGETS = ["steam", "browser"];
   function normalizeSettings(raw) {
@@ -413,11 +413,11 @@
   }
   function formatConversion(amount, from, mode, rates, opts = {}) {
     if (mode === "off") return null;
-    const wantRub = mode === "rub" || mode === "both" || mode === "galaxy";
+    const wantRub = mode === "rub" || mode === "bank" || mode === "both" || mode === "galaxy";
     const wantUsd = mode === "usd" || mode === "both";
     const parts = [];
     if (wantRub && from !== "RUB") {
-      const viaTopUp = opts.provider && opts.providerRates ? quote(amount, from, opts.provider, opts.providerRates, opts.method ?? "")?.charge ?? null : null;
+      const viaTopUp = mode === "bank" || !opts.provider || !opts.providerRates ? null : quote(amount, from, opts.provider, opts.providerRates, opts.method ?? "")?.charge ?? null;
       if (viaTopUp != null) parts.push(formatRubExact(viaTopUp));
       else {
         const v = rates ? convert(amount, from, "RUB", rates) : null;
@@ -436,7 +436,6 @@
   var UI_CLASS = "spc-ui";
   var HOST_CLASS = "spc-host";
   var STRIKE_CLASS = "spc-strike";
-  var STRIKE_VAR = "--spc-conv";
   var SEARCH_COL_VAR = "--spc-search-price";
   var SEARCH_COL_GAP = 10;
   function inOwnUi(el) {
@@ -452,10 +451,13 @@
     const t = formatConversion(amount, from, ctx.mode, ctx.rates, { provider: ctx.provider, providerRates: ctx.providerRates, method: ctx.method });
     return t ? ` ${t}` : "";
   }
-  function hasStrikeBefore(el) {
+  function isStruckOut(el) {
     const win = el.ownerDocument.defaultView;
     if (!win || typeof win.getComputedStyle !== "function") return false;
     try {
+      const own = win.getComputedStyle(el);
+      const line = own.textDecorationLine || own.textDecoration || "";
+      if (line.includes("line-through")) return true;
       const cs = win.getComputedStyle(el, "::before");
       if (!cs || cs.content === "none" || cs.content === "normal" || cs.content === "") return false;
       if (cs.position !== "absolute") return false;
@@ -463,26 +465,6 @@
     } catch {
       return false;
     }
-  }
-  function layoutStrikes(hosts) {
-    const widths = [];
-    for (const host of hosts) {
-      if (!host.isConnected) continue;
-      let span = null;
-      for (const child of Array.from(host.children)) {
-        if (child.classList.contains(CONV_CLASS)) {
-          span = child;
-          break;
-        }
-      }
-      let w = 0;
-      if (span) {
-        const sr = span.getBoundingClientRect();
-        if (sr.width > 0) w = Math.max(0, Math.ceil(host.getBoundingClientRect().right - sr.left));
-      }
-      widths.push([host, w]);
-    }
-    for (const [host, w] of widths) host.style.setProperty(STRIKE_VAR, `${w}px`);
   }
   function layoutSearchColumn(doc) {
     const grids = doc.querySelectorAll(".responsive_search_name_combined");
@@ -505,7 +487,7 @@
     const next = node.nextSibling;
     return next instanceof HTMLElement && next.classList.contains(CONV_CLASS) ? next : null;
   }
-  function annotateTextNode(node, ctx, pending) {
+  function annotateTextNode(node, ctx) {
     if (!acceptable(node)) return false;
     const raw = node.nodeValue ?? "";
     if (!/\d/.test(raw) || !isPriceText(raw, ctx.cur)) {
@@ -517,14 +499,18 @@
       siblingConv(node)?.remove();
       return false;
     }
+    const host = node.parentElement;
+    if (host && (host.classList.contains(STRIKE_CLASS) || isStruckOut(host))) {
+      host.classList.add(STRIKE_CLASS);
+      siblingConv(node)?.remove();
+      return false;
+    }
     const existing = siblingConv(node);
     if (existing) {
       if (existing.dataset.spcAmount !== String(amount)) {
         existing.dataset.spcAmount = String(amount);
         existing.dataset.spcCur = ctx.cur.code;
         existing.textContent = render(amount, ctx.cur.code, ctx);
-        const host2 = node.parentElement;
-        if (host2?.classList.contains(STRIKE_CLASS)) pending?.add(host2);
       }
       return true;
     }
@@ -534,21 +520,12 @@
     span.dataset.spcCur = ctx.cur.code;
     span.textContent = render(amount, ctx.cur.code, ctx);
     node.parentNode?.insertBefore(span, node.nextSibling);
-    const host = node.parentElement;
-    if (host) {
-      host.classList.add(HOST_CLASS);
-      if (hasStrikeBefore(host)) {
-        host.classList.add(STRIKE_CLASS);
-        pending?.add(host);
-      }
-    }
+    host?.classList.add(HOST_CLASS);
     return true;
   }
   function processTree(root, ctx) {
     if (root.nodeType === 3) {
-      const pending2 = /* @__PURE__ */ new Set();
-      const ok = annotateTextNode(root, ctx, pending2);
-      layoutStrikes(pending2);
+      const ok = annotateTextNode(root, ctx);
       layoutSearchColumn(root.ownerDocument);
       return ok ? 1 : 0;
     }
@@ -566,9 +543,7 @@
       if (/\d/.test(n.nodeValue ?? "")) nodes.push(n);
     }
     let count = 0;
-    const pending = /* @__PURE__ */ new Set();
-    for (const t of nodes) if (annotateTextNode(t, ctx, pending)) count++;
-    layoutStrikes(pending);
+    for (const t of nodes) if (annotateTextNode(t, ctx)) count++;
     layoutSearchColumn(doc);
     return count;
   }
@@ -579,7 +554,6 @@
       if (!Number.isFinite(amount)) return;
       span.textContent = render(amount, from, ctx);
     });
-    layoutStrikes(doc.querySelectorAll(`.${STRIKE_CLASS}`));
     layoutSearchColumn(doc);
   }
   function applyMode(doc, mode) {
@@ -594,13 +568,11 @@
       const batch = [...queue];
       queue.clear();
       if (!ctx) return;
-      const pending = /* @__PURE__ */ new Set();
       for (const node of batch) {
         if (!node.isConnected) continue;
-        if (node.nodeType === 3) annotateTextNode(node, ctx, pending);
+        if (node.nodeType === 3) annotateTextNode(node, ctx);
         else processTree(node, ctx);
       }
-      layoutStrikes(pending);
       layoutSearchColumn(doc);
     };
     const mo = new MutationObserver((muts) => {
@@ -792,6 +764,9 @@
   // core/header.ts
   var MODE_LABELS = {
     rub: "₽",
+    // The two ruble modes stand next to each other in a very narrow select, so the difference has to fit in a word:
+    // plain ₽ is what the purchase costs, "₽ курс" is the same price at the bank rate.
+    bank: "₽ курс",
     both: "₽ + $",
     usd: "$",
     off: "Как есть",
@@ -837,7 +812,12 @@ html:not(.spc-off) .CapsuleBottomBar{justify-content:flex-end}
 /* Cart panel: same shape as Steam's checkout button (its classes are copied onto ours), Steam's green over it. */
 .${CART_BTN_CLASS}{background:linear-gradient(to right,#75b022 5%,#588a1b 95%)!important;color:#d2efa9!important;border:none!important;width:100%;margin-bottom:8px}
 .${CART_BTN_CLASS}:hover{background:linear-gradient(to right,#8ed629 5%,#6aa621 95%)!important;color:#fff!important}
-html:not(.spc-off) .${STRIKE_CLASS}::before{transform:none!important;right:var(${STRIKE_VAR},0px)!important}
+/* Steam crosses the old price out with a line turned at an angle, and the angle is baked into the transform for
+   the width Steam expects. Our conversion next to the new price makes the whole price block wider, the old price
+   is laid out anew, and the slanted line lands beside the digits instead of over them. Straightened it always
+   covers the number — and the owner prefers the horizontal line anyway. It runs edge to edge of the old price:
+   nothing of ours is inside that element (see annotateTextNode in core/dom.ts). */
+html:not(.spc-off) .${STRIKE_CLASS}::before{transform:none!important}
 /* Both wrappers sit in Steam's black bar, which aligns its children on a text baseline: a wrapper that keeps its
    own 12px strut ends up 36px tall instead of 32 and pushes the whole row down by 2px. Zeroing the strut makes
    every child exactly as tall as its button. */
