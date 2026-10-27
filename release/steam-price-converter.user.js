@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Steam Price Converter (₽ / $)
 // @namespace    https://github.com/grozovsky/steam-price-converter
-// @version      1.2.0
+// @version      1.2.1
 // @description  Показывает цены магазина Steam в рублях и долларах рядом с оригиналом, независимо от региона аккаунта.
 // @author       grozovsky
 // @updateURL    https://github.com/grozovsky/steam-price-converter/releases/latest/download/steam-price-converter.user.js
@@ -18,7 +18,6 @@
 // @connect      www.cbr-xml-daily.ru
 // @connect      cdn.jsdelivr.net
 // @connect      galaxylink.gg
-// @connect      steam.galaxylink.gg
 // ==/UserScript==
 
 "use strict";
@@ -28,18 +27,18 @@
   function methodById(r, id) {
     return r.methods.find((m) => m.id === id) ?? r.methods[0] ?? null;
   }
-  function baseAtRate(amount, currency, r) {
+  function baseAtRateKopeck(amount, currency, r) {
     const rubPerUnit = currency === "RUB" ? 1 : r.rates[currency];
     if (!rubPerUnit) return null;
-    return Math.ceil(amount * rubPerUnit - 1e-9);
+    return Math.ceil(amount * rubPerUnit * 100 - 1e-7) / 100;
   }
   function creditedAtRate(base, currency, r) {
     const rubPerUnit = currency === "RUB" ? 1 : r.rates[currency];
     if (!rubPerUnit) return null;
     return base / rubPerUnit;
   }
-  function chargeWithPercent(base, fee) {
-    return Math.round(base * (1 + fee / 100) * 100 + 1e-9) / 100;
+  function chargeCeilRuble(base, fee) {
+    return Math.ceil(base * (1 + fee / 100) - 1e-9);
   }
   function quote(need, currency, p, r, method) {
     if (!(need > 0)) return null;
@@ -55,35 +54,29 @@
   }
 
   // core/providers/galaxylink.ts
-  var GALAXY_HOME = "https://galaxylink.gg/";
-  var GALAXY_VALIDATE_URL = "https://steam.galaxylink.gg/api/validate_steam";
+  var GALAXY_HOME = "https://galaxylink.gg/ru/steam-topup";
   var GALAXY_HARD_MIN = 50;
-  var DEFAULT_FEES = { SBP: 2, BANK_CARD: 4 };
-  var LABELS = { SBP: "СБП", BANK_CARD: "Банковская карта" };
+  var DEFAULT_MAX = 29e3;
+  var DEFAULT_FEE = 2;
+  var METHOD_ID = "ANY";
+  var METHOD_LABEL = "СБП или карта — на их странице";
   function parseGalaxyRates(text, fetchedAt) {
-    const m = /STEAM_RATES\s*=\s*(\{[^}]*\})/.exec(text);
-    if (!m) return null;
-    let rates;
-    try {
-      const obj = JSON.parse(m[1]);
-      rates = {};
-      for (const [k, v] of Object.entries(obj)) if (typeof v === "number" && v > 0) rates[k.toUpperCase()] = v;
-    } catch {
-      return null;
+    const rates = {};
+    const pair = /data-currency="([A-Z]{3})"[^>]*?data-per-ruble="([\d.]+)"/g;
+    let m;
+    while (m = pair.exec(text)) {
+      const perRuble = Number(m[2]);
+      if (perRuble > 0) rates[m[1]] = 1 / perRuble;
     }
-    if (!rates.RUB) rates.RUB = 1;
+    rates.RUB = 1;
     if (Object.keys(rates).length < 2) return null;
-    const fee = (id) => {
-      const found = new RegExp(`${id}\\s*:\\s*(\\d+(?:\\.\\d+)?)`).exec(text);
-      return found ? Number(found[1]) : DEFAULT_FEES[id];
-    };
-    const min = /MIN_AMOUNT\s*=\s*(\d+)/.exec(text);
-    const max = /MAX_AMOUNT\s*=\s*(\d+)/.exec(text);
+    const max = /data-max-rubles="(\d+)"/.exec(text);
+    const fee = /data-commission-badge[^>]*>\s*([\d.]+)\s*%/.exec(text);
     return {
       rates,
-      methods: Object.keys(DEFAULT_FEES).map((id) => ({ id, label: LABELS[id] ?? id, fee: fee(id) })),
-      min: Math.max(min ? Number(min[1]) : GALAXY_HARD_MIN, GALAXY_HARD_MIN),
-      max: max ? Number(max[1]) : 3e4,
+      methods: [{ id: METHOD_ID, label: METHOD_LABEL, fee: fee ? Number(fee[1]) : DEFAULT_FEE }],
+      min: GALAXY_HARD_MIN,
+      max: max ? Number(max[1]) : DEFAULT_MAX,
       fetchedAt
     };
   }
@@ -94,9 +87,9 @@
     checkout: "deal",
     validatesLogin: true,
     parseRates: parseGalaxyRates,
-    baseFor: baseAtRate,
+    baseFor: baseAtRateKopeck,
     credited: creditedAtRate,
-    charge: (base, r, method) => chargeWithPercent(base, methodById(r, method)?.fee ?? 0)
+    charge: (base, r, method) => chargeCeilRuble(base, methodById(r, method)?.fee ?? DEFAULT_FEE)
   };
 
   // core/providers/tbank.ts
@@ -1089,14 +1082,10 @@ html:not(.spc-off) .${STRIKE_CLASS}::before{transform:none!important}
     fetchProviderRates(providerId, force) {
       return cachedText(`spc.provider.${providerId}`, providerById(providerId).home, GALAXY_TTL_MS, force);
     },
-    async validateSteamLogin(_providerId, login) {
-      try {
-        const r = await request(GALAXY_VALIDATE_URL, "POST", `nickname=${encodeURIComponent(login)}`);
-        const j = JSON.parse(r.text);
-        return typeof j?.success === "boolean" ? j.success : null;
-      } catch {
-        return null;
-      }
+    // Nothing in the browser asks this (there is no top-up dialog here), and GalaxyLink's check now needs a Laravel
+    // session and a CSRF token from their page (see the plugin's backend). "Unavailable" is the honest answer.
+    async validateSteamLogin() {
+      return null;
     },
     // The browser page has the balance in its own header (core reads #header_wallet_balance), and there is no dialog
     // here: the provider's own site opens in a new tab and the user types the amount themselves — which is why
