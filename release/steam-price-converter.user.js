@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         Steam Price Converter (₽ / $)
 // @namespace    https://github.com/grozovsky/steam-price-converter
-// @version      1.2.1
+// @version      1.2.2
 // @description  Показывает цены магазина Steam в рублях и долларах рядом с оригиналом, независимо от региона аккаунта.
 // @author       grozovsky
 // @updateURL    https://github.com/grozovsky/steam-price-converter/releases/latest/download/steam-price-converter.user.js
@@ -58,8 +58,9 @@
   var GALAXY_HARD_MIN = 50;
   var DEFAULT_MAX = 29e3;
   var DEFAULT_FEE = 2;
-  var METHOD_ID = "ANY";
-  var METHOD_LABEL = "СБП или карта — на их странице";
+  var CARD_EXTRA = 2;
+  var SBP = "SBP";
+  var CARD = "BANK_CARD";
   function parseGalaxyRates(text, fetchedAt) {
     const rates = {};
     const pair = /data-currency="([A-Z]{3})"[^>]*?data-per-ruble="([\d.]+)"/g;
@@ -74,7 +75,11 @@
     const fee = /data-commission-badge[^>]*>\s*([\d.]+)\s*%/.exec(text);
     return {
       rates,
-      methods: [{ id: METHOD_ID, label: METHOD_LABEL, fee: fee ? Number(fee[1]) : DEFAULT_FEE }],
+      // The card's fee is shown as the plain sum; the bill itself compounds, see `charge` below.
+      methods: [
+        { id: SBP, label: "СБП", fee: fee ? Number(fee[1]) : DEFAULT_FEE },
+        { id: CARD, label: "Банковская карта", fee: (fee ? Number(fee[1]) : DEFAULT_FEE) + CARD_EXTRA }
+      ],
       min: GALAXY_HARD_MIN,
       max: max ? Number(max[1]) : DEFAULT_MAX,
       fetchedAt
@@ -86,10 +91,14 @@
     home: GALAXY_HOME,
     checkout: "deal",
     validatesLogin: true,
+    needsEmail: true,
     parseRates: parseGalaxyRates,
     baseFor: baseAtRateKopeck,
     credited: creditedAtRate,
-    charge: (base, r, method) => chargeCeilRuble(base, methodById(r, method)?.fee ?? DEFAULT_FEE)
+    charge(base, r, method) {
+      const sbp = chargeCeilRuble(base, r.methods.find((m) => m.id === SBP)?.fee ?? DEFAULT_FEE);
+      return methodById(r, method)?.id === CARD ? chargeCeilRuble(sbp, CARD_EXTRA) : sbp;
+    }
   };
 
   // core/providers/tbank.ts
@@ -181,6 +190,7 @@
     provider: DEFAULT_PROVIDER.id,
     galaxy_method: "SBP",
     steam_login: "",
+    email: "",
     // Steam's own browser window keeps the payment inside the client and shows the domain in its address bar.
     pay_target: "steam",
     auto_restart: "no"
@@ -188,6 +198,7 @@
   var MODES = ["off", "rub", "bank", "usd", "both"];
   var SOURCES = ["market", "cbr"];
   var PAY_TARGETS = ["steam", "browser"];
+  var EMAIL_RE = /^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/;
   function normalizeSettings(raw) {
     const r = raw && typeof raw === "object" ? raw : {};
     const rawMode = r.mode === "galaxy" ? "rub" : r.mode;
@@ -197,9 +208,10 @@
     const gm = typeof r.galaxy_method === "string" && /^[A-Za-z0-9_-]{1,32}$/.test(r.galaxy_method) ? r.galaxy_method : DEFAULT_SETTINGS.galaxy_method;
     const provider = providerById(typeof r.provider === "string" ? r.provider : void 0).id;
     const login = typeof r.steam_login === "string" && /^[A-Za-z0-9_\-.]{1,64}$/.test(r.steam_login) ? r.steam_login : "";
+    const email = typeof r.email === "string" && EMAIL_RE.test(r.email) ? r.email : "";
     const pt = PAY_TARGETS.includes(r.pay_target) ? r.pay_target : DEFAULT_SETTINGS.pay_target;
     const ar = r.auto_restart === "yes" ? "yes" : "no";
-    return { mode, source, store_currency: sc, provider, galaxy_method: gm, steam_login: login, pay_target: pt, auto_restart: ar };
+    return { mode, source, store_currency: sc, provider, galaxy_method: gm, steam_login: login, email, pay_target: pt, auto_restart: ar };
   }
 
   // core/currencies.ts
